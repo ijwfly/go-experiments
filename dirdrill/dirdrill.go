@@ -10,7 +10,8 @@ import (
 	"sync"
 )
 
-const FileSizesChanSize = 1024
+const FileChannelBufferSize = 1024
+const ResultChannelsCapacity = 1024
 
 func readDirectory(path string) ([]os.DirEntry, error) {
 	// TODO: open files via file descriptor pool to avoid problems with directories with many directories
@@ -32,7 +33,7 @@ func extractFileInfo(dirEntry os.DirEntry) (string, int64) {
 	return fileName, fileInfo.Size()
 }
 
-func prepareSelectCases(resultChannels []chan int64) []reflect.SelectCase {
+func prepareSelectCases(resultChannels []chan *FSFile) []reflect.SelectCase {
 	cases := make([]reflect.SelectCase, len(resultChannels))
 	for i, ch := range resultChannels {
 		cases[i] = reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(ch)}
@@ -40,10 +41,10 @@ func prepareSelectCases(resultChannels []chan int64) []reflect.SelectCase {
 	return cases
 }
 
-func drillDirStructure(path string, root *FSDirectory, wg *sync.WaitGroup) chan int64 {
-	fileSizesChan := make(chan int64)
+func drillDirStructure(path string, root *FSDirectory, wg *sync.WaitGroup) chan *FSFile {
+	filesChan := make(chan *FSFile, FileChannelBufferSize)
 	go func() {
-		defer close(fileSizesChan)
+		defer close(filesChan)
 		defer wg.Done()
 
 		files, err := readDirectory(path)
@@ -54,7 +55,7 @@ func drillDirStructure(path string, root *FSDirectory, wg *sync.WaitGroup) chan 
 			return
 		}
 
-		childResultChannels := make([]chan int64, 0, FileSizesChanSize)
+		childResultChannels := make([]chan *FSFile, 0, ResultChannelsCapacity)
 
 		sort.Slice(files, func(i, j int) bool { return files[i].Name() < files[j].Name() })
 		for _, dirEntry := range files {
@@ -74,7 +75,7 @@ func drillDirStructure(path string, root *FSDirectory, wg *sync.WaitGroup) chan 
 					name: fileName,
 					size: fileSize,
 				}
-				fileSizesChan <- fileSize
+				filesChan <- &result
 				root.AddObject(&result)
 			}
 		}
@@ -90,21 +91,20 @@ func drillDirStructure(path string, root *FSDirectory, wg *sync.WaitGroup) chan 
 				continue
 			}
 
-			fileSize := value.Int()
-
-			root.AddFileSize(fileSize)
-			fileSizesChan <- fileSize
+			file := value.Interface().(*FSFile)
+			root.AddFileSize(file.GetSize())
+			filesChan <- file
 		}
 	}()
 	wg.Add(1)
-	return fileSizesChan
+	return filesChan
 }
 
 func GetDirStructure(path string) FSDirectory {
 	result := FSDirectory{}
 	wg := sync.WaitGroup{}
 	resultChan := drillDirStructure(path, &result, &wg)
-	for _ = range resultChan {
+	for range resultChan {
 	}
 	wg.Wait()
 	return result
